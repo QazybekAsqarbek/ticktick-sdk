@@ -32,6 +32,7 @@ from ticktick_sdk.models import (
 )
 from ticktick_sdk.settings import TickTickSettings, get_settings
 from ticktick_sdk.unified import UnifiedTickTickAPI
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class TickTickClient:
             device_id=device_id,
         )
         self._initialized = False
+        self._user_timezone: ZoneInfo | None = None
 
     @classmethod
     def from_settings(cls, settings: TickTickSettings | None = None) -> TickTickClient:
@@ -176,6 +178,44 @@ class TickTickClient:
             Complete sync state
         """
         return await self._api.sync_all()
+
+    # ===============================================================
+    # Utils
+    # ===============================================================
+
+    async def _get_user_timezone(self) -> ZoneInfo:
+        """
+        Get the user's timezone from TickTick preferences.
+
+        Caches the result to avoid repeated API calls.
+
+        Returns:
+            ZoneInfo object representing the user's timezone
+        """
+        if self._user_timezone is None:
+            try:
+                preferences = await self.get_preferences()
+                tz_str = preferences.get("timeZone", "UTC")
+                self._user_timezone = ZoneInfo(tz_str)
+            except Exception as e:
+                logger.warning(f"Failed to get user timezone, falling back to UTC: {e}")
+                self._user_timezone = ZoneInfo("UTC")
+        return self._user_timezone
+
+    def _get_today_in_user_timezone(self) -> date:
+        """
+        Get today's date in the user's timezone.
+
+        Note: This is a synchronous wrapper that returns UTC if timezone hasn't been fetched yet.
+        For accurate results, call await _get_user_timezone() first.
+
+        Returns:
+            Today's date in the user's timezone
+        """
+        if self._user_timezone is None:
+            # Fallback to UTC if timezone not yet fetched
+            return datetime.now(ZoneInfo("UTC")).date()
+        return datetime.now(self._user_timezone).date()
 
     # =========================================================================
     # Tasks
@@ -1287,31 +1327,54 @@ class TickTickClient:
 
     async def get_today_tasks(self) -> list[Task]:
         """
-        Get tasks due today.
+        Get tasks for today (in the user's timezone).
+        
+        Includes tasks where:
+        - Today falls within [start_date, due_date] range
+        - Due date equals today
+        - Start date equals today
 
         Returns:
-            List of tasks due today
+            List of tasks for today
         """
-        today = date.today()
+        user_tz = await self._get_user_timezone()  # Ensure timezone is loaded
+        today = self._get_today_in_user_timezone()
         all_tasks = await self.get_all_tasks()
-        return [
-            task for task in all_tasks
-            if task.due_date and task.due_date.date() == today
-        ]
+        
+        result = []
+        for task in all_tasks:
+            # Check if task has a date range (both start and due dates)
+            if task.start_date and task.due_date:
+                start_in_tz = task.start_date.astimezone(user_tz).date()
+                due_in_tz = task.due_date.astimezone(user_tz).date()
+                # Include if today is within the range [start_date, due_date]
+                if start_in_tz <= today <= due_in_tz:
+                    result.append(task)
+            # If only due_date, check if it matches today
+            elif task.due_date:
+                if task.due_date.astimezone(user_tz).date() == today:
+                    result.append(task)
+            # If only start_date, check if it matches today
+            elif task.start_date:
+                if task.start_date.astimezone(user_tz).date() == today:
+                    result.append(task)
+        return result
+
 
     async def get_overdue_tasks(self) -> list[Task]:
         """
-        Get overdue tasks.
+        Get overdue tasks (based on user's timezone).
 
         Returns:
             List of overdue tasks
         """
-        today = date.today()
+        user_tz = await self._get_user_timezone()
+        today = self._get_today_in_user_timezone()
         all_tasks = await self.get_all_tasks()
         return [
             task for task in all_tasks
             if task.due_date
-            and task.due_date.date() < today
+            and task.due_date.astimezone(user_tz).date() < today
             and not task.is_completed
         ]
 
