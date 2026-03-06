@@ -78,14 +78,15 @@ class TickTickModel(BaseModel):
         if value is None:
             return None
 
-        # Ensure timezone aware
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
 
         if for_api == "v1":
             return value.strftime(DATETIME_FORMAT_V1)
-        else:
-            return value.strftime(DATETIME_FORMAT_V2)
+
+        # V2 format hardcodes +0000 so we must normalize to UTC first
+        value = value.astimezone(timezone.utc)
+        return value.strftime(DATETIME_FORMAT_V2)
 
     def to_v1_dict(self) -> dict[str, Any]:
         """Convert to V1 API format dictionary."""
