@@ -10,6 +10,7 @@ and converts between unified models and API-specific formats.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 from types import TracebackType
@@ -331,14 +332,13 @@ class UnifiedTickTickAPI:
         if not verification.get("v2"):
             errors.append("V2 authentication verification failed")
 
-        # Check if we have both APIs
         if not self._router.is_fully_configured:
             raise TickTickConfigurationError(
                 "Both V1 and V2 APIs are required. " + "; ".join(errors),
             )
 
         self._initialized = True
-        logger.info("Unified API initialized successfully")
+        logger.info("Unified API initialized successfully (V1 + V2)")
 
     async def close(self) -> None:
         """Close all API clients."""
@@ -405,13 +405,49 @@ class UnifiedTickTickAPI:
         """
         List all active tasks.
 
+        Uses V2 sync when available (returns all tasks at once).
+        Falls back to V1 by fetching tasks per project.
+
         Returns:
             List of all active tasks
         """
         self._ensure_initialized()
-        state = await self._v2_client.sync()  # type: ignore
-        tasks_data = state.get("syncTaskBean", {}).get("update", [])
-        return [Task.from_v2(t) for t in tasks_data]
+
+        if self._router.has_v2:
+            state = await self._v2_client.sync()  # type: ignore
+            tasks_data = state.get("syncTaskBean", {}).get("update", [])
+            return [Task.from_v2(t) for t in tasks_data]
+
+        if self._router.has_v1:
+            projects = await self._v1_client.get_projects()  # type: ignore
+            proj_ids = [
+                p.get("id") if isinstance(p, dict) else getattr(p, "id", None)
+                for p in projects
+            ]
+            proj_ids = [pid for pid in proj_ids if pid]
+
+            async def _fetch_project_tasks(pid: str) -> list[Task]:
+                try:
+                    data = await self._v1_client.get_project_with_data(pid)  # type: ignore
+                    tasks_raw = data.get("tasks") or []
+                    result = []
+                    for t in tasks_raw:
+                        try:
+                            result.append(Task.from_v1(t))
+                        except Exception as e:
+                            logger.debug("Skipping unparseable task in project %s: %s", pid, e)
+                    return result
+                except Exception as e:
+                    logger.warning("Failed to fetch tasks for project %s: %s", pid, e)
+                    return []
+
+            batches = await asyncio.gather(*[_fetch_project_tasks(pid) for pid in proj_ids])
+            return [task for batch in batches for task in batch]
+
+        raise TickTickAPIUnavailableError(
+            "Could not list tasks: no API available",
+            operation="list_all_tasks",
+        )
 
     async def get_task(self, task_id: str, project_id: str | None = None) -> Task:
         """
