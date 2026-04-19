@@ -633,12 +633,14 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
                 tasks = [t for t in tasks if t.priority == target_priority]
 
             if params.due_today:
-                today = date.today()
-                tasks = [t for t in tasks if t.due_date and t.due_date.date() == today]
+                user_tz = await client._get_user_timezone()
+                today = client._get_today_in_user_timezone()
+                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(user_tz).date() == today]
 
             if params.overdue:
-                today = date.today()
-                tasks = [t for t in tasks if t.due_date and t.due_date.date() < today and not t.is_completed]
+                user_tz = await client._get_user_timezone()
+                today = client._get_today_in_user_timezone()
+                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(user_tz).date() < today and not t.is_completed]
 
         elif params.status == "completed":
             # Completed tasks require date range
